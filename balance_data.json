@@ -62,6 +62,11 @@
   "AnyRouter-github_cookies": {
     "quota": 1182.57,
     "used": 17.43,
-    "timestamp": 1764036303.8314419
+    "timestamp": 1764036642.0709064
+  },
+  "AnyRouter-linuxdo_cookies": {
+    "quota": 1194.35,
+    "used": 350.65,
+    "timestamp": 1764036634.0558536
   }
 }
