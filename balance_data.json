@@ -68,5 +68,15 @@
     "quota": 1546.64,
     "used": 723.36,
     "timestamp": 1766601608.3679051
+  },
+  "anyrouter-linuxdo_cookies": {
+    "quota": 1547.67,
+    "used": 747.33,
+    "timestamp": 1766646162.3365648
+  },
+  "anyrouter-github_cookies": {
+    "quota": 1932.57,
+    "used": 17.43,
+    "timestamp": 1766646171.378906
   }
 }
