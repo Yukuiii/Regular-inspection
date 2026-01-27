@@ -78,5 +78,15 @@
     "quota": 2682.57,
     "used": 17.43,
     "timestamp": 1769237006.1372385
+  },
+  "github_cookies": {
+    "quota": 2707.57,
+    "used": 17.43,
+    "timestamp": 1769496586.4412067
+  },
+  "linuxdo_cookies": {
+    "quota": 2174.77,
+    "used": 845.23,
+    "timestamp": 1769496595.3929064
   }
 }
