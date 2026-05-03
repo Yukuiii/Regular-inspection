@@ -112,28 +112,21 @@ class CookiesAuthenticator(Authenticator):
                 else:
                     logger.info(f"ℹ️ [{self.account_name}] URL 包含 login 但未检测到登录表单，可能是其他页面")
 
-            # 步骤4: 尝试在浏览器中通过 API 验证 Cookies（使用 fetch，自动携带 cookies）
+            # 步骤4: 在浏览器中通过 API 验证 Cookies（使用 fetch，自动携带 cookies）
             logger.info(f"🔍 [{self.account_name}] 步骤2: 通过浏览器 API 验证 Cookies...")
 
-            api_validation_success = False
-            api_user_id = None
-            api_username = None
-
             try:
-                # 使用浏览器的 fetch API 来验证（自动携带 cookies）
                 user_info_url = self.provider_config.get_user_info_url()
 
                 # 获取 api_user（从配置或推断）
                 api_user = self.auth_config.api_user
                 if not api_user:
-                    # 尝试从账号名推断
                     import re
                     numbers = re.findall(r'\d+', self.account_name)
                     api_user = numbers[0] if numbers else self.account_name
 
                 logger.info(f"🔑 [{self.account_name}] 使用 API User: {api_user}")
 
-                # 构建请求参数
                 fetch_params = {
                     "url": user_info_url,
                     "apiUser": str(api_user)
@@ -179,114 +172,75 @@ class CookiesAuthenticator(Authenticator):
 
                 logger.info(f"📊 [{self.account_name}] 浏览器 API 响应状态: {result.get('status')}")
 
+                # 网络异常
                 if result.get('error'):
-                    logger.warning(f"⚠️ [{self.account_name}] 浏览器 API 请求失败: {result['error']}")
-                elif result.get('status') == 401:
-                    logger.warning(f"⚠️ [{self.account_name}] API 返回 401，Cookies 可能已失效")
-                elif result.get('ok'):
-                    data = result.get('data')
-                    content_type = result.get('contentType', '')
+                    logger.error(f"❌ [{self.account_name}] 浏览器 API 请求失败: {result['error']}")
+                    return False, None, None, f"API request failed: {result['error']}"
 
-                    # 如果返回的是字符串（可能是 JSON 字符串）
-                    if isinstance(data, str):
-                        if 'application/json' in content_type:
-                            import json
-                            try:
-                                data = json.loads(data)
-                            except:
-                                logger.warning(f"⚠️ [{self.account_name}] JSON 解析失败")
-                                data = None
-                        else:
-                            logger.warning(f"⚠️ [{self.account_name}] API 返回非 JSON 内容: {content_type}")
-                            data = None
+                # 401 直接判定 Cookies 失效
+                if result.get('status') == 401:
+                    logger.error(f"❌ [{self.account_name}] API 返回 401，Cookies 已失效")
+                    return False, None, None, "Cookies expired (API 401)"
 
-                    # 解析用户数据
-                    if isinstance(data, dict):
-                        if data.get("success") and data.get("data"):
-                            user_data = data["data"]
-                            api_user_id = (
-                                user_data.get("id") or
-                                user_data.get("user_id") or
-                                user_data.get("userId")
-                            )
-                            api_username = (
-                                user_data.get("username") or
-                                user_data.get("name") or
-                                user_data.get("email")
-                            )
+                # 其他非 OK 状态码
+                if not result.get('ok'):
+                    logger.error(f"❌ [{self.account_name}] API 返回异常状态码: {result.get('status')}")
+                    return False, None, None, f"API returned status {result.get('status')}"
 
-                            if api_user_id or api_username:
-                                logger.info(
-                                    f"✅ [{self.account_name}] 浏览器 API 验证通过: "
-                                    f"ID={api_user_id}, 用户名={api_username}"
-                                )
-                                api_validation_success = True
-                            else:
-                                logger.warning(f"⚠️ [{self.account_name}] API 响应中未找到用户标识")
-                        elif not data.get("success"):
-                            logger.warning(f"⚠️ [{self.account_name}] API 响应 success=false: {data.get('message', 'Unknown')}")
-                        else:
-                            logger.warning(f"⚠️ [{self.account_name}] API 响应格式异常")
-                else:
-                    logger.warning(f"⚠️ [{self.account_name}] API 返回异常状态码: {result.get('status')}")
+                # 解析响应数据
+                data = result.get('data')
+                content_type = result.get('contentType', '')
 
-            except Exception as api_error:
-                logger.warning(f"⚠️ [{self.account_name}] 浏览器 API 请求异常: {api_error}")
+                if isinstance(data, str):
+                    if 'application/json' in content_type:
+                        import json
+                        try:
+                            data = json.loads(data)
+                        except json.JSONDecodeError:
+                            logger.error(f"❌ [{self.account_name}] JSON 解析失败")
+                            return False, None, None, "Failed to parse API response as JSON"
+                    else:
+                        logger.error(f"❌ [{self.account_name}] API 返回非 JSON 内容: {content_type}")
+                        return False, None, None, f"Non-JSON response: {content_type}"
 
-            # 如果 API 验证成功，直接返回
-            if api_validation_success:
+                if not isinstance(data, dict):
+                    logger.error(f"❌ [{self.account_name}] API 响应格式异常")
+                    return False, None, None, "Invalid API response format"
+
+                if not data.get("success"):
+                    msg = data.get('message', 'Unknown')
+                    logger.error(f"❌ [{self.account_name}] API success=false: {msg}")
+                    return False, None, None, f"API returned success=false: {msg}"
+
+                user_data = data.get("data")
+                if not user_data:
+                    logger.error(f"❌ [{self.account_name}] API 响应中缺少 data 字段")
+                    return False, None, None, "API response missing data field"
+
+                api_user_id = (
+                    user_data.get("id") or
+                    user_data.get("user_id") or
+                    user_data.get("userId")
+                )
+                api_username = (
+                    user_data.get("username") or
+                    user_data.get("name") or
+                    user_data.get("email")
+                )
+
+                if not (api_user_id or api_username):
+                    logger.error(f"❌ [{self.account_name}] API 响应中未找到用户标识")
+                    return False, None, None, "API response missing user identifier"
+
+                logger.info(
+                    f"✅ [{self.account_name}] Cookies 验证通过: "
+                    f"ID={api_user_id}, 用户名={api_username}"
+                )
                 return True, str(api_user_id) if api_user_id else None, api_username, None
 
-            # 步骤5: API 失败，尝试从页面提取用户信息（作为最后的后备方案）
-            logger.info(f"🔍 [{self.account_name}] 步骤3: 从页面提取用户信息作为后备方案...")
-
-            # 先尝试从 localStorage 提取（更可靠）
-            user_id, username = await self._extract_user_from_localstorage(page)
-
-            if not (user_id or username):
-                # localStorage 失败，尝试从页面 URL/元素提取
-                user_id, username = await self._extract_user_from_page(page)
-
-            if user_id or username:
-                logger.info(
-                    f"✅ [{self.account_name}] 从页面提取到用户信息: "
-                    f"ID={user_id}, 用户名={username}"
-                )
-                return True, user_id, username, None
-
-            # 步骤6: 如果完全无法验证，但页面不在登录页，则给予宽容判定
-            # 但要确保至少有一个标识（不能完全为 None）
-            if '/login' not in current_url.lower():
-                logger.warning(
-                    f"⚠️ [{self.account_name}] 无法通过 API 或页面提取验证用户信息，"
-                    f"但当前不在登录页（{current_url}），给予宽容判定"
-                )
-
-                # 尝试从 cookies 中提取可能的用户标识
-                fallback_id = None
-                for cookie in await context.cookies():
-                    # 尝试从 cookie 名称中找到可能的用户 ID
-                    if 'user' in cookie['name'].lower() or 'id' in cookie['name'].lower():
-                        try:
-                            # 如果 cookie 值是数字，可能是用户 ID
-                            potential_id = str(cookie['value'])
-                            if potential_id.isdigit():
-                                fallback_id = potential_id
-                                logger.info(f"ℹ️ [{self.account_name}] 从 cookie '{cookie['name']}' 提取到可能的用户ID: {fallback_id}")
-                                break
-                        except:
-                            pass
-
-                # 如果没有从 cookie 提取到 ID，使用账号名
-                if not fallback_id:
-                    fallback_id = self.account_name
-                    logger.info(f"ℹ️ [{self.account_name}] 使用账号名作为后备标识: {fallback_id}")
-
-                return True, fallback_id, None, None
-
-            # 完全无法验证
-            logger.error(f"❌ [{self.account_name}] 无法通过任何方式验证 Cookies，且页面在登录页")
-            return False, None, None, "Unable to validate cookies through any method and page is at login"
+            except Exception as api_error:
+                logger.error(f"❌ [{self.account_name}] 浏览器 API 请求异常: {api_error}")
+                return False, None, None, f"API validation error: {sanitize_exception(api_error)}"
 
         except Exception as e:
             logger.error(f"❌ [{self.account_name}] Cookies 预检异常: {e}")
