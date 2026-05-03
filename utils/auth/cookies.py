@@ -132,60 +132,83 @@ class CookiesAuthenticator(Authenticator):
                     "apiUser": str(api_user)
                 }
 
-                result = await page.evaluate("""
-                    async ({url, apiUser}) => {
-                        try {
-                            const response = await fetch(url, {
-                                method: 'GET',
-                                headers: {
-                                    'Accept': 'application/json',
-                                    'X-Requested-With': 'XMLHttpRequest',
-                                    'New-Api-User': apiUser
-                                },
-                                credentials: 'include'
-                            });
+                # 网络波动重试机制（最多3次，仅对网络错误/5xx 重试，401 等定性失败立即终止）
+                max_retries = 3
+                result = None
 
-                            const contentType = response.headers.get('content-type');
-                            let data;
+                for attempt in range(1, max_retries + 1):
+                    if attempt > 1:
+                        backoff = 2 * (attempt - 1)
+                        logger.info(f"⏳ [{self.account_name}] 等待 {backoff}s 后重试 ({attempt}/{max_retries})...")
+                        await asyncio.sleep(backoff)
 
-                            if (contentType && contentType.includes('application/json')) {
-                                data = await response.json();
-                            } else {
-                                data = await response.text();
+                    result = await page.evaluate("""
+                        async ({url, apiUser}) => {
+                            try {
+                                const response = await fetch(url, {
+                                    method: 'GET',
+                                    headers: {
+                                        'Accept': 'application/json',
+                                        'X-Requested-With': 'XMLHttpRequest',
+                                        'New-Api-User': apiUser
+                                    },
+                                    credentials: 'include'
+                                });
+
+                                const contentType = response.headers.get('content-type');
+                                let data;
+
+                                if (contentType && contentType.includes('application/json')) {
+                                    data = await response.json();
+                                } else {
+                                    data = await response.text();
+                                }
+
+                                return {
+                                    status: response.status,
+                                    ok: response.ok,
+                                    contentType: contentType,
+                                    data: data
+                                };
+                            } catch (error) {
+                                return {
+                                    status: 0,
+                                    ok: false,
+                                    error: error.message
+                                };
                             }
-
-                            return {
-                                status: response.status,
-                                ok: response.ok,
-                                contentType: contentType,
-                                data: data
-                            };
-                        } catch (error) {
-                            return {
-                                status: 0,
-                                ok: false,
-                                error: error.message
-                            };
                         }
-                    }
-                """, fetch_params)
+                    """, fetch_params)
 
-                logger.info(f"📊 [{self.account_name}] 浏览器 API 响应状态: {result.get('status')}")
+                    status = result.get('status')
+                    logger.info(f"📊 [{self.account_name}] 浏览器 API 响应状态: {status} (尝试 {attempt}/{max_retries})")
 
-                # 网络异常
-                if result.get('error'):
-                    logger.error(f"❌ [{self.account_name}] 浏览器 API 请求失败: {result['error']}")
-                    return False, None, None, f"API request failed: {result['error']}"
+                    # 401 - 定性失败，不重试
+                    if status == 401:
+                        logger.error(f"❌ [{self.account_name}] API 返回 401，Cookies 已失效")
+                        return False, None, None, "Cookies expired (API 401)"
 
-                # 401 直接判定 Cookies 失效
-                if result.get('status') == 401:
-                    logger.error(f"❌ [{self.account_name}] API 返回 401，Cookies 已失效")
-                    return False, None, None, "Cookies expired (API 401)"
+                    # 网络异常 - 暂时性失败，重试
+                    if result.get('error'):
+                        logger.warning(f"⚠️ [{self.account_name}] 网络异常 (尝试 {attempt}/{max_retries}): {result['error']}")
+                        if attempt < max_retries:
+                            continue
+                        return False, None, None, f"API request failed after {max_retries} retries: {result['error']}"
 
-                # 其他非 OK 状态码
-                if not result.get('ok'):
-                    logger.error(f"❌ [{self.account_name}] API 返回异常状态码: {result.get('status')}")
-                    return False, None, None, f"API returned status {result.get('status')}"
+                    # 5xx 服务器异常 - 暂时性失败，重试
+                    if status and 500 <= status < 600:
+                        logger.warning(f"⚠️ [{self.account_name}] 服务器异常 {status} (尝试 {attempt}/{max_retries})")
+                        if attempt < max_retries:
+                            continue
+                        return False, None, None, f"Server error {status} after {max_retries} retries"
+
+                    # 其他非 OK 状态码 - 定性失败，不重试
+                    if not result.get('ok'):
+                        logger.error(f"❌ [{self.account_name}] API 返回异常状态码: {status}")
+                        return False, None, None, f"API returned status {status}"
+
+                    # 200 OK，退出重试循环
+                    break
 
                 # 解析响应数据
                 data = result.get('data')
