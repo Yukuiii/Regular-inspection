@@ -18,7 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     permissions:
-      contents: write  # 允许提交和推送更改
+      contents: write       # 允许提交和推送更改
+      deployments: write    # 允许写入 deployment 状态描述
 
     steps:
       - name: 检出代码
@@ -169,3 +170,69 @@ jobs:
             balance_hash.txt
             balance_data.json
           retention-days: 7
+
+      - name: 更新 Deployment 描述（显示余额摘要）
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          # 1) 生成余额摘要（控制在 140 字符以内）
+          if [ -f balance_data.json ]; then
+            SUMMARY=$(python3 - <<'PY'
+          import json
+          from datetime import datetime, timezone, timedelta
+          try:
+              with open('balance_data.json', 'r', encoding='utf-8') as f:
+                  data = json.load(f)
+              n = len(data)
+              total_q = sum(v.get('quota', 0) for v in data.values())
+              total_u = sum(v.get('used', 0) for v in data.values())
+              ts = datetime.now(timezone(timedelta(hours=8))).strftime('%m-%d %H:%M')
+              print(f"{n}账号 · 余额 ${total_q:,.2f} · 已用 ${total_u:,.2f} · {ts}")
+          except Exception as e:
+              print(f"读取余额失败: {e}")
+          PY
+          )
+          else
+            SUMMARY="未生成余额数据"
+          fi
+
+          # 截断到 140 字符（GitHub API 上限）
+          SUMMARY=$(printf "%.140s" "$SUMMARY")
+
+          # 2) job 状态映射到 deployment state
+          if [ "$JOB_STATUS" = "success" ]; then
+            STATE="success"
+          else
+            STATE="failure"
+          fi
+
+          echo "📝 摘要: $SUMMARY"
+          echo "📊 状态: $STATE"
+
+          # 3) 找到本次运行对应的 deployment（按 SHA + environment 倒序取最新）
+          DEPLOYMENT_ID=$(gh api \
+            "/repos/${REPO}/deployments?sha=${SHA}&environment=production&per_page=1" \
+            --jq '.[0].id // empty' || echo "")
+
+          if [ -z "$DEPLOYMENT_ID" ]; then
+            echo "⚠️ 未找到对应的 deployment,跳过状态更新"
+            exit 0
+          fi
+
+          echo "🎯 Deployment ID: $DEPLOYMENT_ID"
+
+          # 4) 写入状态(描述会显示在 deployments 列表里)
+          gh api -X POST \
+            "/repos/${REPO}/deployments/${DEPLOYMENT_ID}/statuses" \
+            -f state="$STATE" \
+            -f description="$SUMMARY" \
+            -f log_url="https://github.com/${REPO}/actions/runs/${RUN_ID}" \
+            -f environment_url="https://github.com/${REPO}/actions/runs/${RUN_ID}" \
+            > /dev/null
+
+          echo "✅ Deployment 描述已更新"
